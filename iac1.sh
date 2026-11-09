@@ -1,51 +1,70 @@
 #!/bin/bash
+#
+# iac1.sh - Provisiona diretórios, grupos, usuários e permissões.
+# Idempotente: pode ser executado várias vezes sem erro e sempre converge
+# o sistema para o estado definido em config.sh.
 
-echo "=== Iniciando a criação da infraestrutura de usuários ==="
+set -Eeuo pipefail
 
-echo "1. Criando diretórios públicos e restritos..."
-mkdir /publico
-mkdir /adm
-mkdir /ven
-mkdir /sec
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=config.sh
+source "${SCRIPT_DIR}/config.sh"
 
-echo "2. Criando grupos de usuários..."
-groupadd GRP_ADM
-groupadd GRP_VEN
-groupadd GRP_SEC
+trap 'log_error "Falha na linha ${LINENO}: \"${BASH_COMMAND}\" (código $?)"' ERR
 
-echo "3. Criando usuários e associando aos seus respectivos grupos..."
-# Especificamos o shell padrão (-s) e forçamos a criação do diretório home (-m)
-# Além disso, já adicionamos o usuário ao grupo principal (-g)
+require_root
 
-# Grupo ADM
-useradd carlos -m -s /bin/bash -g GRP_ADM
-useradd maria -m -s /bin/bash -g GRP_ADM
-useradd joao -m -s /bin/bash -g GRP_ADM
+echo "${C_BOLD}=== Iniciando a criação da infraestrutura de usuários ===${C_RESET}"
 
-# Grupo VEN
-useradd debora -m -s /bin/bash -g GRP_VEN
-useradd sebastiana -m -s /bin/bash -g GRP_VEN
-useradd roberto -m -s /bin/bash -g GRP_VEN
+log_step "1. Criando diretórios públicos e restritos..."
+for dir in "${PUBLIC_DIR}" $(printf '%s\n' "${!DIR_GROUP[@]}" | sort); do
+    if [[ -d "${dir}" ]]; then
+        log_skip "Diretório ${dir} já existe"
+    else
+        mkdir -p "${dir}"
+        log_info "Diretório ${dir} criado"
+    fi
+done
 
-# Grupo SEC
-useradd josefina -m -s /bin/bash -g GRP_SEC
-useradd amanda -m -s /bin/bash -g GRP_SEC
-useradd rogerio -m -s /bin/bash -g GRP_SEC
+log_step "2. Criando grupos de usuários..."
+for group in "${GROUPS_LIST[@]}"; do
+    if getent group "${group}" >/dev/null; then
+        log_skip "Grupo ${group} já existe"
+    else
+        groupadd "${group}"
+        log_info "Grupo ${group} criado"
+    fi
+done
 
-echo "4. Definindo os donos e grupos dos diretórios (chown)..."
-# O dono de todas as pastas será o root
-chown root:root /publico
-chown root:GRP_ADM /adm
-chown root:GRP_VEN /ven
-chown root:GRP_SEC /sec
+log_step "3. Criando usuários e associando aos seus respectivos grupos..."
+# -m cria o home, -s define o shell e -g define o grupo primário.
+for user in $(printf '%s\n' "${!USER_GROUP[@]}" | sort); do
+    group="${USER_GROUP[${user}]}"
+    if id "${user}" &>/dev/null; then
+        # Garante a convergência caso o usuário exista com grupo/shell diferentes.
+        usermod -g "${group}" -s "${USER_SHELL}" "${user}"
+        log_skip "Usuário ${user} já existe (grupo ${group} e shell garantidos)"
+    else
+        useradd "${user}" -m -s "${USER_SHELL}" -g "${group}"
+        log_info "Usuário ${user} criado no grupo ${group}"
+    fi
+done
 
-echo "5. Ajustando as permissões de acesso (chmod)..."
-# /publico: Todos podem ler, escrever e executar (777 ou rwxrwxrwx)
-chmod 777 /publico
+log_step "4. Definindo os donos e grupos dos diretórios (chown)..."
+chown root:root "${PUBLIC_DIR}"
+log_info "${PUBLIC_DIR} -> root:root"
+for dir in $(printf '%s\n' "${!DIR_GROUP[@]}" | sort); do
+    chown "root:${DIR_GROUP[${dir}]}" "${dir}"
+    log_info "${dir} -> root:${DIR_GROUP[${dir}]}"
+done
 
-# Pastas restritas: Dono e Grupo têm acesso total. Demais usuários não veem nada (770 ou rwxrwx---)
-chmod 770 /adm
-chmod 770 /ven
-chmod 770 /sec
+log_step "5. Ajustando as permissões de acesso (chmod)..."
+chmod "${PUBLIC_MODE}" "${PUBLIC_DIR}"
+log_info "${PUBLIC_DIR} -> ${PUBLIC_MODE} (rwxrwxrwx)"
+for dir in $(printf '%s\n' "${!DIR_GROUP[@]}" | sort); do
+    chmod "${RESTRICTED_MODE}" "${dir}"
+    log_info "${dir} -> ${RESTRICTED_MODE} (rwxrwx---)"
+done
 
-echo "=== Infraestrutura criada com sucesso! ==="
+echo "${C_GREEN}${C_BOLD}=== Infraestrutura criada com sucesso! ===${C_RESET}"
+echo "Valide com: sudo ./test_iac.sh"
